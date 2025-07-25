@@ -32,15 +32,15 @@ class MultiLevelCache:
         """Initialize Redis connection with fallback handling"""
         try:
             redis_url = os.getenv("REDIS_URL")
-            if redis_url:
+            if redis_url and redis_url != "your_redis_url_here":
                 self.redis_client = redis.from_url(redis_url, decode_responses=True)
                 # Test connection
                 self.redis_client.ping()
-                print("[INFO] Connected to Redis L2 Cache (Shared Translation Pool)")
+                print("✅ Connected to Redis L2 Cache (Shared Translation Pool)")
             else:
-                print("[WARN] No Redis URL provided, L2 cache disabled")
+                print("⚠️ No valid Redis URL provided, L2 cache disabled")
         except Exception as e:
-            print(f"[WARN] Redis connection failed: {e}")
+            print(f"⚠️ Redis connection failed: {e}")
             self.redis_client = None
     
     def _generate_cache_key(self, text: str, target_language: str) -> str:
@@ -53,7 +53,7 @@ class MultiLevelCache:
         
         # Try L1 Cache first (fastest, ~0.1ms)
         if self.l1_cache and cache_key in self.l1_cache:
-            result = self.l1_cache[cache_key].copy()  # Create copy to avoid modifying cached data
+            result = self.l1_cache[cache_key]
             result["cache_level"] = "L1"
             return result
         
@@ -63,13 +63,13 @@ class MultiLevelCache:
                 cached_data = self.redis_client.get(cache_key)
                 if cached_data:
                     result = json.loads(cached_data)
-                    # Populate L1 cache for future requests (store clean copy)
+                    # Populate L1 cache for future requests
                     if self.l1_cache:
-                        self.l1_cache[cache_key] = result.copy()
+                        self.l1_cache[cache_key] = result
                     result["cache_level"] = "L2"
                     return result
             except Exception as e:
-                print(f"[WARN] L2 cache read error: {e}")
+                print(f"⚠️ L2 cache read error: {e}")
         
         return None
     
@@ -90,7 +90,7 @@ class MultiLevelCache:
                     json.dumps(translation_data, ensure_ascii=False)
                 )
             except Exception as e:
-                print(f"[WARN] L2 cache write error: {e}")
+                print(f"⚠️ L2 cache write error: {e}")
     
     def get_cache_stats(self) -> Dict[str, Any]:
         """Get cache statistics"""
@@ -98,7 +98,7 @@ class MultiLevelCache:
             "l1_enabled": self.enable_l1,
             "l2_enabled": self.enable_l2 and self.redis_client is not None,
             "l1_size": len(self.l1_cache) if self.l1_cache else 0,
-            "l1_maxsize": self.l1_cache.maxsize if self.l1_cache else 0,
+            "l1_maxsize": self.l1_cache_size if self.l1_cache else 0,
         }
         
         if self.redis_client:

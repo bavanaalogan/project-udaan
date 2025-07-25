@@ -11,7 +11,7 @@ class TranslationServices:
     def __init__(self):
         self.mymemory_api_key = os.getenv("MYMEMORY_API_KEY")
         self.mymemory_base_url = os.getenv("MYMEMORY_BASE_URL", "https://api.mymemory.translated.net")
-        self.libretranslate_base_url = os.getenv("LIBRETRANSLATE_BASE_URL", "https://libretranslate.com")
+        self.libretranslate_base_url = os.getenv("LIBRETRANSLATE_BASE_URL", "https://libretranslate.de")
         self.request_timeout = int(os.getenv("REQUEST_TIMEOUT", 30))
         self.enable_mock_fallback = os.getenv("ENABLE_MOCK_FALLBACK", "true").lower() == "true"
         
@@ -312,49 +312,177 @@ class TranslationServices:
         except:
             return lang_code.lower()
     
+
+    def _chunk_text(self, text: str, max_length: int = 450) -> list:
+        """Split text into chunks under the character limit"""
+        if len(text) <= max_length:
+            return [text]
+        
+        chunks = []
+        sentences = text.split('. ')
+        current_chunk = ""
+        
+        for sentence in sentences:
+            if len(current_chunk + sentence + ". ") <= max_length:
+                current_chunk += sentence + ". "
+            else:
+                if current_chunk:
+                    chunks.append(current_chunk.strip())
+                current_chunk = sentence + ". "
+                if current_chunk:
+                    chunks.append(current_chunk.strip())
+                current_chunk = sentence + ". "
+        
+        if current_chunk:
+            chunks.append(current_chunk.strip())
+        
+        # Handle cases where even single sentences are too long
+        final_chunks = []
+        for chunk in chunks:
+            if len(chunk) <= max_length:
+                final_chunks.append(chunk)
+            else:
+                # Split by character count as last resort
+                for i in range(0, len(chunk), max_length):
+                    final_chunks.append(chunk[i:i+max_length])
+        
+        return final_chunks
+    
     async def translate_with_mymemory(self, text: str, target_language: str, source_language: str = "auto") -> Optional[Dict[str, Any]]:
-        """Translate using MyMemory API (primary service)"""
+        """Translate using MyMemory API (fallback service)"""
         try:
             target_lang = self._normalize_language_code(target_language)
             source_lang = self._normalize_language_code(source_language)
-            
+
             params = {
                 "q": text,
                 "langpair": f"{source_lang}|{target_lang}",
             }
-            
+
             if self.mymemory_api_key:
                 params["key"] = self.mymemory_api_key
-            
+
             async with httpx.AsyncClient(timeout=self.request_timeout) as client:
                 response = await client.get(f"{self.mymemory_base_url}/get", params=params)
                 response.raise_for_status()
-                
+
                 data = response.json()
-                
+
                 if data.get("responseStatus") == 200:
-                    translated_text = data["responseData"]["translatedText"]
-                    match_quality = int(data["responseData"].get("match", 0))
+                    # Prefer exact segment match with high quality, prioritizing native script
+                    input_clean = text.strip().lower()
+                    best_match = None
+                    native_script_match = None
+                    transliterated_match = None
                     
+                    def is_native_script(text, target_lang):
+                        """Check if text uses native script for the target language"""
+                        if target_lang == "ta":  # Tamil
+                            return any(ord(char) >= 0x0B80 and ord(char) <= 0x0BFF for char in text)
+                        elif target_lang == "hi":  # Hindi
+                            return any(ord(char) >= 0x0900 and ord(char) <= 0x097F for char in text)
+                        elif target_lang == "te":  # Telugu
+                            return any(ord(char) >= 0x0C00 and ord(char) <= 0x0C7F for char in text)
+                        elif target_lang == "kn":  # Kannada
+                            return any(ord(char) >= 0x0C80 and ord(char) <= 0x0CFF for char in text)
+                        elif target_lang == "ml":  # Malayalam
+                            return any(ord(char) >= 0x0D00 and ord(char) <= 0x0D7F for char in text)
+                        elif target_lang == "bn":  # Bengali
+                            return any(ord(char) >= 0x0980 and ord(char) <= 0x09FF for char in text)
+                        elif target_lang == "gu":  # Gujarati
+                            return any(ord(char) >= 0x0A80 and ord(char) <= 0x0AFF for char in text)
+                        elif target_lang == "pa":  # Punjabi
+                            return any(ord(char) >= 0x0A00 and ord(char) <= 0x0A7F for char in text)
+                        return True  # Default to accepting for other languages
+                    
+                    for match in data.get("matches", []):
+                        segment = match.get("segment", "").strip().lower()
+                        translation = match.get("translation", "").strip()
+                        quality = int(match.get("quality", 0))
+
+                        if segment == input_clean and translation and translation != "Test123" and quality >= 75:
+                            match_data = {
+                                "translated_text": translation,
+                                "confidence": quality
+                            }
+                            
+                            if is_native_script(translation, target_lang):
+                                if not native_script_match or quality > native_script_match["confidence"]:
+                                    native_script_match = match_data
+                            else:
+                                if not transliterated_match or quality > transliterated_match["confidence"]:
+                                    transliterated_match = match_data
+                    
+                    # Prioritize native script, then transliterated, then responseData
+                    if native_script_match:
+                        best_match = native_script_match
+                    elif transliterated_match:
+                        best_match = transliterated_match
+                    else:
+                        # Fall back to responseData if no good match found
+                        response_text = data["responseData"].get("translatedText", "")
+                        # MyMemory returns match as decimal (0.85) but we need percentage (85)
+                        raw_match = data["responseData"].get("match", 0)
+                        confidence_score = int(float(raw_match) * 100) if raw_match else 75
+                        
+                        if response_text and is_native_script(response_text, target_lang):
+                            best_match = {
+                                "translated_text": response_text,
+                                "confidence": confidence_score
+                            }
+                        else:
+                            best_match = {
+                                "translated_text": response_text,
+                                "confidence": confidence_score
+                            }
+
                     return {
-                        "translated_text": translated_text,
+                        "translated_text": best_match["translated_text"],
                         "source_language": source_lang,
                         "target_language": target_lang,
                         "service": "mymemory",
-                        "confidence": match_quality,
+                        "confidence": best_match["confidence"],
                         "original_text": text
                     }
-                    
+
         except Exception as e:
             print(f"⚠️ MyMemory translation failed: {e}")
-            
-        return None
+            return None
+
     
     async def translate_with_libretranslate(self, text: str, target_language: str, source_language: str = "auto") -> Optional[Dict[str, Any]]:
-        """Translate using LibreTranslate free API (fallback service)"""
+        """Translate using LibreTranslate free API (primary service) - LIMITED LANGUAGE SUPPORT"""
         try:
             target_lang = self._normalize_language_code(target_language)
-            source_lang = "auto" if source_language == "auto" else self._normalize_language_code(source_language)
+            
+            # LibreTranslate has limited language support - check if target language is supported
+            # Common supported languages in most public instances
+            supported_languages = ['en', 'es', 'fr', 'de', 'it', 'pt', 'ru', 'ja', 'ko', 'ar', 'zh', 'hi']
+            
+            if target_lang not in supported_languages:
+                print(f"⚠️ LibreTranslate doesn't support target language: {target_lang}")
+                return None
+            
+            # LibreTranslate doesn't support "auto", so detect or default to English
+            if source_language == "auto":
+                source_lang = "en"  # Default to English for auto-detection
+            else:
+                source_lang = self._normalize_language_code(source_language)
+            
+            if source_lang not in supported_languages:
+                print(f"⚠️ LibreTranslate doesn't support source language: {source_lang}")
+                return None
+            
+            # Validate that we have different source and target languages
+            if source_lang == target_lang:
+                return {
+                    "translated_text": text,  # Return original text if same language
+                    "source_language": source_lang,
+                    "target_language": target_lang,
+                    "service": "libretranslate",
+                    "confidence": 100,
+                    "original_text": text
+                }
             
             payload = {
                 "q": text,
@@ -363,26 +491,38 @@ class TranslationServices:
                 "format": "text"
             }
             
-            async with httpx.AsyncClient(timeout=self.request_timeout) as client:
-                response = await client.post(f"{self.libretranslate_base_url}/translate", json=payload)
+            async with httpx.AsyncClient(timeout=self.request_timeout, follow_redirects=True) as client:
+                response = await client.post(
+                    f"{self.libretranslate_base_url}/translate", 
+                    json=payload,
+                    headers={"Content-Type": "application/json"}
+                )
                 response.raise_for_status()
                 
-                data = await response.json()
+                data = response.json()
                 
-                if "translatedText" in data:
+                if "translatedText" in data and data["translatedText"].strip():
                     return {
                         "translated_text": data["translatedText"],
-                        "source_language": data.get("detectedLanguage", {}).get("language", source_lang),
+                        "source_language": data.get("detectedLanguage", {}).get("language", source_lang) if isinstance(data.get("detectedLanguage"), dict) else source_lang,
                         "target_language": target_lang,
                         "service": "libretranslate",
-                        "confidence": 75,
+                        "confidence": 80,  # Higher confidence for LibreTranslate
                         "original_text": text
                     }
+                else:
+                    print(f"⚠️ LibreTranslate returned empty translation for: {text}")
+                    return None
                     
+        except httpx.HTTPStatusError as e:
+            print(f"⚠️ LibreTranslate HTTP error {e.response.status_code}: {e.response.text}")
+            return None
+        except httpx.TimeoutException:
+            print(f"⚠️ LibreTranslate timeout after {self.request_timeout}s")
+            return None
         except Exception as e:
             print(f"⚠️ LibreTranslate translation failed: {e}")
-            
-        return None
+            return None
     
     async def translate_with_mock(self, text: str, target_language: str) -> Optional[Dict[str, Any]]:
         """Mock translation using Indian language dictionary (final fallback)"""
@@ -410,39 +550,29 @@ class TranslationServices:
             
         return None
     
-    async def translate(self, text: str, target_language: str, source_language: str = "auto") -> Dict[str, Any]:
-        """
-        Translate text using cascading fallback system for Indian organization:
-        1. MyMemory API (primary)
-        2. LibreTranslate Free API (fallback)
-        3. Indian Language Mock Dictionary (final fallback)
-        """
-        
-        # Try MyMemory first (primary service)
-        result = await self.translate_with_mymemory(text, target_language, source_language)
-        if result:
-            return result
-        
-        # Try LibreTranslate as fallback
-        result = await self.translate_with_libretranslate(text, target_language, source_language)
-        if result:
-            return result
-        
-        # Use Indian language mock dictionary as final fallback
-        result = await self.translate_with_mock(text, target_language)
-        if result:
-            return result
-        
-        # If all services fail, return error
-        return {
-            "translated_text": text,
-            "source_language": source_language,
-            "target_language": target_language,
-            "service": "none",
-            "confidence": 0,
-            "original_text": text,
-            "error": "All translation services failed"
-        }
+    async def _translate_single_chunk(self, text: str, target_language: str, source_language: str = "auto") -> Dict[str, Any]:
+        """Translate a single chunk of text, handling chunking if needed"""
+        # Check if text needs chunking
+        if len(text) > 450:
+            chunks = self._chunk_text(text)
+            translated_chunks = []
+            
+            for chunk in chunks:
+                result = await self.translate(chunk, source_language, target_language)
+                if result.get("error"):
+                    return result  # Return error if any chunk fails
+                translated_chunks.append(result["translated_text"])
+            
+            return {
+                "translated_text": " ".join(translated_chunks),
+                "source_language": source_language,
+                "target_language": target_language,
+                "service": "chunked",
+                "confidence": 75,
+                "original_text": text
+            }
+        else:
+            return await self.translate(text, source_language, target_language)
     
     async def translate_batch(self, texts: list, target_language: str, source_language: str = "auto") -> list:
         """Translate multiple texts in parallel for maximum speed"""
@@ -453,13 +583,50 @@ class TranslationServices:
         
         async def translate_single(text: str):
             async with semaphore:
-                return await self.translate(text, target_language, source_language)
+                return await self.translate(text, source_language, target_language)
         
         # Execute translations in parallel
         tasks = [translate_single(text) for text in texts]
         results = await asyncio.gather(*tasks)
         
         return results
+
+    async def translate(self, text: str, source_language: str, target_language: str) -> 'TranslationResponse':
+        # Try MyMemory first (primary service) - Better language support including Tamil
+        try:
+            result = await self.translate_with_mymemory(text, target_language, source_language)
+            if result:
+                return result
+        except Exception as e:
+            print(f"⚠️ MyMemory (primary) failed: {e}")
+        
+        # Try LibreTranslate as fallback (limited language support)
+        try:
+            result = await self.translate_with_libretranslate(text, target_language, source_language)
+            if result:
+                return result
+        except Exception as e:
+            print(f"⚠️ LibreTranslate (fallback) failed: {e}")
+        
+        # Try mock dictionary as final fallback
+        try:
+            result = await self.translate_with_mock(text, target_language)
+            if result:
+                return result
+        except Exception as e:
+            print(f"⚠️ Mock dictionary (final fallback) failed: {e}")
+        
+        # If all services fail, return error response
+        return {
+            "translated_text": text,
+            "source_language": source_language,
+            "target_language": target_language,
+            "service": "none",
+            "confidence": 0,
+            "original_text": text,
+            "error": "All translation services failed"
+        }
+
 
 # Global translation service instance
 translation_service = TranslationServices()

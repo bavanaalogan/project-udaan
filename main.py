@@ -39,12 +39,12 @@ total_translations = 0
 async def startup_event():
     """Initialize services on startup"""
     init_database()
-    print("🚀 Translation Microservice Started!")
-    print("📝 POST /translate - Single translation (max 1000 chars)")
-    print("📝 POST /translate/batch - Batch translations")
-    print("🌍 Supports all ISO 639 language codes")
-    print("🔄 Multi-level caching enabled")
-    print("⚡ Parallel processing ready")
+    print("[INFO] Translation Microservice Started!")
+    print("[INFO] POST /translate - Single translation (max 1000 chars)")
+    print("[INFO] POST /translate/batch - Batch translations")
+    print("[INFO] Supports all ISO 639 language codes")
+    print("[INFO] Multi-level caching enabled")
+    print("[INFO] Parallel processing ready")
 
 @app.post("/translate", response_model=TranslationResponse)
 async def translate_text(
@@ -88,8 +88,8 @@ async def translate_text(
         # Not in cache, translate using cascading services
         translation_result = await translation_service.translate(
             request.text, 
-            request.target_language, 
-            request.source_language
+            request.source_language,
+            request.target_language
         )
         
         # Store in multi-level cache for future requests
@@ -175,8 +175,8 @@ async def translate_batch(
                 # Translate using cascading services
                 translation_result = await translation_service.translate(
                     text, 
-                    request.target_language, 
-                    request.source_language
+                    request.source_language,
+                    request.target_language
                 )
                 
                 # Add individual processing time and cache level
@@ -270,7 +270,31 @@ async def health_check():
             print(f"⚠️ Database health check failed: {e}")
             service_checks.append(False)
         
-        # 2. Test MyMemory API
+        # 2. Test LibreTranslate API (primary service)
+        libretranslate_status = {
+            "reachable": False,
+            "response_time_ms": None,
+            "error": None
+        }
+        
+        try:
+            start_test = time.time() * 1000
+            async with httpx.AsyncClient(timeout=10) as client:
+                test_response = await client.get(f"{translation_service.libretranslate_base_url}/languages")
+                if test_response.status_code == 200:
+                    libretranslate_status["reachable"] = True
+                    libretranslate_status["response_time_ms"] = round((time.time() * 1000) - start_test, 2)
+                    service_checks.append(True)
+                else:
+                    libretranslate_status["error"] = f"HTTP {test_response.status_code}"
+                    service_checks.append(False)
+        except Exception as e:
+            libretranslate_status["error"] = str(e)[:100]
+            service_checks.append(False)
+        
+        health_results["services"]["libretranslate"] = libretranslate_status
+        
+        # 3. Test MyMemory API (fallback service)
         mymemory_status = {
             "configured": bool(translation_service.mymemory_api_key),
             "reachable": False,
@@ -300,30 +324,6 @@ async def health_check():
             service_checks.append(False)
         
         health_results["services"]["mymemory"] = mymemory_status
-        
-        # 3. Test LibreTranslate API
-        libretranslate_status = {
-            "reachable": False,
-            "response_time_ms": None,
-            "error": None
-        }
-        
-        try:
-            start_test = time.time() * 1000
-            async with httpx.AsyncClient(timeout=10) as client:
-                test_response = await client.get(f"{translation_service.libretranslate_base_url}/languages")
-                if test_response.status_code == 200:
-                    libretranslate_status["reachable"] = True
-                    libretranslate_status["response_time_ms"] = round((time.time() * 1000) - start_test, 2)
-                    service_checks.append(True)
-                else:
-                    libretranslate_status["error"] = f"HTTP {test_response.status_code}"
-                    service_checks.append(False)
-        except Exception as e:
-            libretranslate_status["error"] = str(e)[:100]
-            service_checks.append(False)
-        
-        health_results["services"]["libretranslate"] = libretranslate_status
         
         # 4. Test Redis Connection
         redis_status = {
@@ -366,7 +366,7 @@ async def health_check():
         health_results["cache_stats"] = cache_stats
         
         # 7. Determine overall health status
-        critical_services = service_checks[:2]  # Database and MyMemory are critical
+        critical_services = service_checks[:2]  # Database and LibreTranslate are critical
         total_services = len(service_checks)
         healthy_services = sum(service_checks)
         

@@ -1,0 +1,30 @@
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environment
+venv/
+.venv/ # Common alternative virtual environment name
+
+# Environment variables
+.env
+.env.*
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Editor/IDE specific files
+.vscode/
+.idea/
+
+# FastAPI/Uvicorn specific
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Logs
+*.log

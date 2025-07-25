@@ -1,9 +1,9 @@
 from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy.orm import sessionmaker
 from contextlib import contextmanager
 import os
 from dotenv import load_dotenv
-from models import Base
+from app.models import Base
 
 load_dotenv()
 
@@ -22,7 +22,7 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 def init_database():
     """Initialize database tables"""
     Base.metadata.create_all(bind=engine)
-    print("[INFO] Database initialized successfully")
+    print("✅ Database initialized successfully")
 
 @contextmanager
 def get_db_session():
